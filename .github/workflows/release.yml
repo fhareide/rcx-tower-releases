@@ -1,0 +1,149 @@
+name: Release
+
+# Builds RCX Tower from the private source repo and publishes the apps here.
+#
+# The source is checked out with PRIVATE_REPO_TOKEN (a fine-grained token with read-only
+# Contents access to that one repo). It is never committed here.
+#
+# Pushing a `v*` tag to the source repo releases it: the source repo's pre-push hook
+# (`tools/hooks/pre-push`) creates the same tag here, which builds the source at that tag and
+# publishes the release, with that version's CHANGELOG.md section as its note. By hand, from
+# the Actions tab or with:
+#   gh workflow run release.yml -R fhareide/rcx-tower-releases -f ref=main -f tag=v0.1.0
+# Leave `tag` empty to get the apps as workflow artifacts without a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit of the source repo to build"
+        type: string
+        default: main
+      tag:
+        description: "Release tag to publish (e.g. v0.1.0); empty = artifacts only"
+        type: string
+        default: ""
+
+env:
+  SOURCE_REPO: fhareide/rcx-tower
+  # A pushed tag builds the source repo's tag of the same name and releases it.
+  SOURCE_REF: ${{ github.event_name == 'push' && github.ref_name || inputs.ref }}
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: windows.exe
+          - os: macos-latest       # Apple silicon
+            asset: mac-arm64.dmg
+          - os: macos-15-intel     # Intel
+            asset: mac-x86_64.dmg
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The hook tags this repo just before the source repo's push lands, so give it a moment.
+      - name: Wait for the source tag
+        if: github.event_name == 'push'
+        env:
+          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          for i in $(seq 1 24); do
+            if git ls-remote --exit-code "https://x-access-token:$TOKEN@github.com/$SOURCE_REPO.git" "refs/tags/$SOURCE_REF" > /dev/null; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::$SOURCE_REF is not in $SOURCE_REPO after 2 minutes"
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Version
+        run: |
+          if [[ -n "$RELEASE_TAG" ]]; then v="${RELEASE_TAG#v}"; else v="$(git rev-parse --short HEAD)"; fi
+          src="$(python -c 'import rcxtower; print(rcxtower.__version__)')"
+          if [[ -n "$RELEASE_TAG" && "$v" != "$src" ]]; then
+            echo "::error::tag $RELEASE_TAG but rcxtower/__init__.py says $src"
+            exit 1
+          fi
+          echo "ASSET=RCX-Tower-$v-${{ matrix.asset }}" >> "$GITHUB_ENV"
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          python -m pip install --quiet pyinstaller
+          call build_exe.bat || exit /b 1
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          chmod +x build_mac.sh
+          ./build_mac.sh
+      - name: NQC build log
+        if: always() && runner.os == 'macOS'
+        run: tail -n 40 build/nqc-build.log || true
+      - name: Window self-test (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 3
+        run: '"dist/RCX Tower.app/Contents/MacOS/RCX Tower" gui --selftest'
+
+      - name: Collect
+        run: |
+          mkdir -p out
+          if [[ "$RUNNER_OS" == Windows ]]; then cp "dist/RCX Tower.exe" "out/$ASSET"; else cp dist/*.dmg "out/$ASSET"; fi
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: out/${{ env.ASSET }}
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' || inputs.tag != ''
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4  # the source's CHANGELOG.md, for the note
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
+          path: src
+          sparse-checkout: |
+            CHANGELOG.md
+            .github/release-notes.sh
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${RELEASE_TAG#v}"
+          {
+            sh src/.github/release-notes.sh "$v"
+            echo; echo "---"; echo
+            echo "Downloads: **Windows** \`RCX-Tower-$v-windows.exe\`, **macOS** \`RCX-Tower-$v-mac-arm64.dmg\` (Apple silicon) or \`RCX-Tower-$v-mac-x86_64.dmg\` (Intel). First start (SmartScreen / Gatekeeper, tower driver): see the README on the repo's front page."
+          } > notes.md
+          cat notes.md
+          gh release create "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "RCX Tower $v" --notes-file notes.md --latest

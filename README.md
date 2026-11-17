@@ -31,3 +31,5 @@ RCX Tower is under the MIT licence. The apps include the LEGO RCX firmware 3.2.8
 The LEGO Group) and NQC by Dave Baum and John Hansen (Mozilla Public License 1.0, source at
 <https://bricxcc.sourceforge.net/nqc/>). LEGO and Mindstorms are trademarks of the LEGO
 Group, which does not sponsor or endorse this project.
+
+This repository holds only the build workflow; the source is developed elsewhere.
