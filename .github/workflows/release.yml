@@ -66,6 +66,9 @@ jobs:
             asset: mac-arm64.dmg
           - os: macos-15-intel     # Intel
             asset: mac-x86_64.dmg
+          # The oldest supported Ubuntu runner, so the program runs on older glibc versions too.
+          - os: ubuntu-22.04
+            asset: linux-x86_64.tar.gz
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -114,19 +117,34 @@ jobs:
         run: |
           chmod +x build_mac.sh
           ./build_mac.sh
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq flex bison xvfb > /dev/null
+          chmod +x build_linux.sh
+          ./build_linux.sh
       - name: NQC build log
-        if: always() && runner.os == 'macOS'
+        if: always() && runner.os != 'Windows'
         run: tail -n 40 build/nqc-build.log || true
       - name: Window self-test (macOS)
         if: runner.os == 'macOS'
         continue-on-error: true
         timeout-minutes: 3
         run: '"dist/RCX Tower.app/Contents/MacOS/RCX Tower" gui --selftest'
+      - name: Window self-test (Linux)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        timeout-minutes: 3
+        run: xvfb-run -a dist/rcx-tower gui --selftest
 
       - name: Collect
         run: |
           mkdir -p out
-          if [[ "$RUNNER_OS" == Windows ]]; then cp "dist/RCX Tower.exe" "out/$ASSET"; else cp dist/*.dmg "out/$ASSET"; fi
+          case "$RUNNER_OS" in
+            Windows) cp "dist/RCX Tower.exe" "out/$ASSET" ;;
+            macOS) cp dist/*.dmg "out/$ASSET" ;;
+            Linux) cp dist/*.tar.gz "out/$ASSET" ;;
+          esac
           ls -la out
       - uses: actions/upload-artifact@v4
         with:
@@ -162,7 +180,7 @@ jobs:
           {
             sh src/.github/release-notes.sh "$v"
             echo; echo "---"; echo
-            echo "Downloads: **Windows** \`RCX-Tower-$v-windows.exe\`, **macOS** \`RCX-Tower-$v-mac-arm64.dmg\` (Apple silicon) or \`RCX-Tower-$v-mac-x86_64.dmg\` (Intel). First start (SmartScreen / Gatekeeper, tower driver): see the README on the repo's front page."
+            echo "Downloads: **Windows** \`RCX-Tower-$v-windows.exe\`, **macOS** \`RCX-Tower-$v-mac-arm64.dmg\` (Apple silicon) or \`RCX-Tower-$v-mac-x86_64.dmg\` (Intel), **Linux** \`RCX-Tower-$v-linux-x86_64.tar.gz\`. First start (SmartScreen / Gatekeeper, tower driver): see the README on the repo's front page."
           } > notes.md
           cat notes.md
           gh release create "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
